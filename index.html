@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-time GPS Tracker</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- Leaflet CSS & JS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .glass-panel {
+            background: rgba(255, 255, 255, 0.7);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.18);
+        }
+    </style>
+</head>
+<body class="bg-slate-100 min-h-screen text-slate-800">
+
+    <!-- Login / Name Prompt Modal -->
+    <div id="login-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm">
+        <div class="bg-white p-8 rounded-2xl shadow-xl w-full max-w-md mx-4">
+            <h2 class="text-2xl font-bold mb-2 text-slate-800">Welcome</h2>
+            <p class="text-slate-500 mb-6">Enter your name to join the live tracker.</p>
+            <input type="text" id="username-input" placeholder="Your Name" class="w-full px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all mb-4">
+            <button id="join-btn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-4 rounded-xl transition-colors disabled:opacity-50">Join Tracker</button>
+        </div>
+    </div>
+
+    <!-- Main Dashboard -->
+    <div id="dashboard" class="hidden flex-col h-screen max-w-5xl mx-auto p-4 sm:p-6 lg:p-8">
+        <header class="flex justify-between items-center mb-8 glass-panel p-4 rounded-2xl shadow-sm">
+            <div>
+                <h1 class="text-xl sm:text-2xl font-bold text-slate-800">Live GPS Tracker</h1>
+                <p id="user-greeting" class="text-sm text-slate-500"></p>
+            </div>
+            <button id="toggle-share-btn" class="bg-green-500 hover:bg-green-600 text-white font-semibold py-2 px-6 rounded-full shadow-md transition-all flex items-center gap-2">
+                <span id="btn-icon">▶</span>
+                <span id="btn-text">Start Sharing</span>
+            </button>
+        </header>
+
+        <main class="flex-1 flex flex-col lg:flex-row gap-6 overflow-hidden h-full pb-4">
+            
+            <!-- Map Container -->
+            <div id="map" class="flex-1 min-h-[400px] rounded-2xl shadow-sm border border-slate-200 z-10 relative"></div>
+
+            <!-- User List -->
+            <div class="w-full lg:w-1/3 flex flex-col overflow-y-auto pr-2" style="max-height: calc(100vh - 200px);">
+                <h2 class="text-lg font-bold mb-4 text-slate-700">Active Users</h2>
+                <div class="flex flex-col gap-4" id="users-grid">
+                    <!-- User cards will be injected here -->
+                </div>
+                <div id="empty-state" class="text-center py-20 text-slate-400 hidden">
+                    <svg class="w-16 h-16 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                    <p>No active users sharing their location right now.</p>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, deleteDoc, onSnapshot, collection } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase Initialization setup based on environment variables
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-gps-app';
+        let app, db, auth;
+        
+        try {
+            const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+                // Dummy config for local testing structural integrity if needed, will fail without real one
+                projectId: 'dummy-project'
+            };
+            app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+        } catch (error) {
+            console.error("Firebase init error:", error);
+            alert("Application configuration missing.");
+        }
+
+        // State variables
+        let userName = "";
+        let userId = "";
+        let isSharing = false;
+        let watchId = null;
+        let map = null;
+        let markers = {};
+        const locationsPath = `artifacts/${appId}/public/data/locations`;
+        
+        // DOM Elements
+        const loginModal = document.getElementById('login-modal');
+        const usernameInput = document.getElementById('username-input');
+        const joinBtn = document.getElementById('join-btn');
+        const dashboard = document.getElementById('dashboard');
+        const userGreeting = document.getElementById('user-greeting');
+        const toggleShareBtn = document.getElementById('toggle-share-btn');
+        const btnText = document.getElementById('btn-text');
+        const btnIcon = document.getElementById('btn-icon');
+        const usersGrid = document.getElementById('users-grid');
+        const emptyState = document.getElementById('empty-state');
+
+        // Authentication Flow
+        async function authenticate() {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+                userId = auth.currentUser.uid;
+                return true;
+            } catch (error) {
+                console.error("Authentication failed:", error);
+                alert("Failed to connect to the server. Please try again.");
+                return false;
+            }
+        }
+
+        // Initialize App
+        joinBtn.addEventListener('click', async () => {
+            const name = usernameInput.value.trim();
+            if (!name) return;
+            
+            joinBtn.disabled = true;
+            joinBtn.textContent = "Connecting...";
+
+            const authenticated = await authenticate();
+            if (authenticated) {
+                userName = name;
+                loginModal.classList.add('hidden');
+                dashboard.classList.remove('hidden');
+                dashboard.classList.add('flex');
+                userGreeting.textContent = `Tracking as ${userName}`;
+                
+                // Initialize Map
+                initMap();
+
+                // Start listening to other users
+                startListening();
+            } else {
+                joinBtn.disabled = false;
+                joinBtn.textContent = "Join Tracker";
+            }
+        });
+
+        function initMap() {
+            if (!map) {
+                // Initialize map centered on Thailand
+                map = L.map('map').setView([13.7563, 100.5018], 5);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    maxZoom: 19,
+                    attribution: '© OpenStreetMap'
+                }).addTo(map);
+                
+                // Make sure map renders properly after container resizes/shows
+                setTimeout(() => { map.invalidateSize(); }, 100);
+            }
+        }
+
+        // Geolocation Logic
+        toggleShareBtn.addEventListener('click', () => {
+            if (isSharing) {
+                stopSharing();
+            } else {
+                startSharing();
+            }
+        });
+
+        function startSharing() {
+            if (!navigator.geolocation) {
+                alert("Geolocation is not supported by your browser.");
+                return;
+            }
+
+            // Update UI
+            isSharing = true;
+            toggleShareBtn.classList.remove('bg-green-500', 'hover:bg-green-600');
+            toggleShareBtn.classList.add('bg-red-500', 'hover:bg-red-600');
+            btnText.textContent = "Stop Sharing";
+            btnIcon.textContent = "■";
+
+            const options = {
+                enableHighAccuracy: true,
+                timeout: 10000,
+                maximumAge: 0
+            };
+
+            watchId = navigator.geolocation.watchPosition(
+                async (position) => {
+                    const lat = position.coords.latitude;
+                    const lng = position.coords.longitude;
+                    const timestamp = new Date().toISOString();
+
+                    try {
+                        const docRef = doc(db, locationsPath, userId);
+                        await setDoc(docRef, {
+                            name: userName,
+                            lat: lat,
+                            lng: lng,
+                            timestamp: timestamp,
+                            userId: userId
+                        });
+                    } catch (error) {
+                        console.error("Error updating location:", error);
+                    }
+                },
+                (error) => {
+                    console.error("Geolocation error:", error);
+                    stopSharing(); // Stop if we lose permission or error out
+                    alert("Unable to retrieve your location.");
+                },
+                options
+            );
+        }
+
+        async function stopSharing() {
+            if (watchId !== null) {
+                navigator.geolocation.clearWatch(watchId);
+                watchId = null;
+            }
+
+            isSharing = false;
+            toggleShareBtn.classList.add('bg-green-500', 'hover:bg-green-600');
+            toggleShareBtn.classList.remove('bg-red-500', 'hover:bg-red-600');
+            btnText.textContent = "Start Sharing";
+            btnIcon.textContent = "▶";
+
+            // Remove user from tracker
+            try {
+                const docRef = doc(db, locationsPath, userId);
+                await deleteDoc(docRef);
+            } catch (error) {
+                console.error("Error removing location:", error);
+            }
+        }
+
+        // Listen for all users' locations
+        function startListening() {
+            const locationsRef = collection(db, locationsPath);
+            
+            onSnapshot(locationsRef, (snapshot) => {
+                usersGrid.innerHTML = '';
+                
+                const currentUsers = new Set();
+                const bounds = [];
+
+                if (snapshot.empty) {
+                    emptyState.classList.remove('hidden');
+                    // Remove all map markers if empty
+                    Object.values(markers).forEach(m => map.removeLayer(m));
+                    markers = {};
+                    return;
+                } else {
+                    emptyState.classList.add('hidden');
+                }
+
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    currentUsers.add(data.userId);
+                    renderUserCard(data);
+                    
+                    // Update Map Markers
+                    const latLng = [data.lat, data.lng];
+                    bounds.push(latLng);
+
+                    if (markers[data.userId]) {
+                        // Update existing marker
+                        markers[data.userId].setLatLng(latLng);
+                        markers[data.userId].getPopup().setContent(`<b>${data.name}</b>${data.userId === userId ? ' (You)' : ''}`);
+                    } else {
+                        // Create new marker
+                        const marker = L.marker(latLng).addTo(map);
+                        marker.bindPopup(`<b>${data.name}</b>${data.userId === userId ? ' (You)' : ''}`);
+                        markers[data.userId] = marker;
+                    }
+                });
+                
+                // Remove markers for users who stopped sharing
+                for (const id in markers) {
+                    if (!currentUsers.has(id)) {
+                        map.removeLayer(markers[id]);
+                        delete markers[id];
+                    }
+                }
+
+                // Fit map bounds to show all markers smoothly
+                if (bounds.length > 0 && map) {
+                    map.fitBounds(bounds, { padding: [50, 50], maxZoom: 16 });
+                }
+
+            }, (error) => {
+                console.error("Error fetching locations realtime:", error);
+            });
+        }
+
+        function renderUserCard(userData) {
+            const timeAgo = new Date(userData.timestamp).toLocaleTimeString();
+            const isMe = userData.userId === userId;
+
+            const card = document.createElement('div');
+            card.className = `p-5 rounded-2xl shadow-sm border ${isMe ? 'bg-blue-50 border-blue-200' : 'bg-white border-slate-100'}`;
+            
+            card.innerHTML = `
+                <div class="flex items-center gap-3 mb-3">
+                    <div class="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white font-bold text-sm shadow-inner">
+                        ${userData.name.charAt(0).toUpperCase()}
+                    </div>
+                    <div>
+                        <h3 class="font-bold text-slate-800 flex items-center gap-2">
+                            ${userData.name}
+                            ${isMe ? '<span class="text-[10px] bg-blue-100 text-blue-800 px-2 py-0.5 rounded-full uppercase tracking-wider">You</span>' : ''}
+                        </h3>
+                        <p class="text-xs text-slate-400">Last updated: ${timeAgo}</p>
+                    </div>
+                </div>
+                <div class="grid grid-cols-2 gap-2 text-sm text-slate-600 bg-slate-50 p-3 rounded-xl border border-slate-100">
+                    <div>
+                        <span class="block text-[10px] uppercase tracking-wider text-slate-400 font-semibold mb-0.5">Latitude</span>
+                        <span class="font-mono">${userData.lat.toFixed(6)}</span>
+                    </div>
+                    <div>
+                        <span class="block text-[10px] uppercase tracking-wider text-slate-400 font-semibold mb-0.5">Longitude</span>
+                        <span class="font-mono">${userData.lng.toFixed(6)}</span>
+                    </div>
+                </div>
+                <div class="mt-3 text-xs text-slate-400 text-right font-mono opacity-50 truncate w-full" title="ID: ${userData.userId}">
+                    ID: ${userData.userId}
+                </div>
+            `;
+            usersGrid.appendChild(card);
+        }
+
+        // Cleanup on window close
+        window.addEventListener('beforeunload', () => {
+            if (isSharing) {
+                stopSharing();
+            }
+        });
+    </script>
+</body>
+</html>
